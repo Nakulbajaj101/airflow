@@ -17,8 +17,8 @@
 import logging
 import os
 import struct
-from datetime import datetime, timedelta
-from typing import Iterable, List, Optional
+from datetime import datetime
+from typing import Iterable, Optional
 
 from sqlalchemy import BigInteger, Column, String, UnicodeText, and_, exists
 
@@ -124,26 +124,27 @@ class DagCode(Base):
             session.add(orm_dag_code)
 
         for fileloc in existing_filelocs:
-            old_version = existing_orm_dag_codes_by_fileloc_hashes[
-                filelocs_to_hashes[fileloc]
-            ]
-            file_modified = datetime.fromtimestamp(
-                os.path.getmtime(correct_maybe_zipped(fileloc)), tz=timezone.utc)
+            current_version = existing_orm_dag_codes_by_fileloc_hashes[filelocs_to_hashes[fileloc]]
+            file_mod_time = datetime.fromtimestamp(
+                os.path.getmtime(correct_maybe_zipped(fileloc)), tz=timezone.utc
+            )
 
-            if (file_modified - timedelta(seconds=120)) > old_version.last_updated:
+            if file_mod_time > current_version.last_updated:
                 orm_dag_code = existing_orm_dag_codes_map[fileloc]
-                orm_dag_code.last_updated = timezone.utcnow()
+                orm_dag_code.last_updated = file_mod_time
                 orm_dag_code.source_code = cls._get_code_from_file(orm_dag_code.fileloc)
                 session.merge(orm_dag_code)
 
     @classmethod
     @provide_session
-    def remove_deleted_code(cls, alive_dag_filelocs: List[str], session=None):
-        """Deletes code not included in alive_dag_filelocs.
+    def remove_unused_code(cls, session=None):
+        """Deletes code that no longer has any DAGs referencing it .
 
-        :param alive_dag_filelocs: file paths of alive DAGs
         :param session: ORM Session
         """
+        from airflow.models.dag import DagModel
+
+        alive_dag_filelocs = [fileloc for fileloc, in session.query(DagModel.fileloc).all()]
         alive_fileloc_hashes = [
             cls.dag_fileloc_hash(fileloc) for fileloc in alive_dag_filelocs]
 

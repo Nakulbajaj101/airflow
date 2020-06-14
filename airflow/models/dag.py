@@ -24,6 +24,7 @@ import pickle
 import re
 import sys
 import traceback
+import warnings
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Callable, Collection, Dict, FrozenSet, Iterable, List, Optional, Set, Type, Union
@@ -55,6 +56,7 @@ from airflow.utils.log.logging_mixin import LoggingMixin
 from airflow.utils.session import provide_session
 from airflow.utils.sqlalchemy import Interval, UtcDateTime
 from airflow.utils.state import State
+from airflow.utils.types import DagRunType
 
 log = logging.getLogger(__name__)
 
@@ -253,7 +255,8 @@ class DAG(BaseDag, LoggingMixin):
 
         self._description = description
         # set file location to caller source path
-        self.fileloc = sys._getframe().f_back.f_code.co_filename
+        back = sys._getframe().f_back
+        self.fileloc = back.f_code.co_filename if back else ""
         self.task_dict: Dict[str, BaseOperator] = dict()
 
         # set timezone from start_date
@@ -409,7 +412,7 @@ class DAG(BaseDag, LoggingMixin):
             if not self.is_fixed_time_schedule():
                 # relative offset (eg. every 5 minutes)
                 delta = cron.get_next(datetime) - naive
-                following = dttm.in_timezone(self.timezone).add_timedelta(delta)
+                following = dttm.in_timezone(self.timezone) + delta
             else:
                 # absolute (e.g. 3 AM)
                 naive = cron.get_next(datetime)
@@ -417,7 +420,7 @@ class DAG(BaseDag, LoggingMixin):
                 following = timezone.make_aware(naive, tz)
             return timezone.convert_to_utc(following)
         elif self.normalized_schedule_interval is not None:
-            return dttm + self.normalized_schedule_interval
+            return timezone.convert_to_utc(dttm + self.normalized_schedule_interval)
 
     def previous_schedule(self, dttm):
         """
@@ -437,7 +440,7 @@ class DAG(BaseDag, LoggingMixin):
             if not self.is_fixed_time_schedule():
                 # relative offset (eg. every 5 minutes)
                 delta = naive - cron.get_prev(datetime)
-                previous = dttm.in_timezone(self.timezone).subtract_timedelta(delta)
+                previous = dttm.in_timezone(self.timezone) - delta
             else:
                 # absolute (e.g. 3 AM)
                 naive = cron.get_prev(datetime)
@@ -445,7 +448,7 @@ class DAG(BaseDag, LoggingMixin):
                 previous = timezone.make_aware(naive, tz)
             return timezone.convert_to_utc(previous)
         elif self.normalized_schedule_interval is not None:
-            return dttm - self.normalized_schedule_interval
+            return timezone.convert_to_utc(dttm - self.normalized_schedule_interval)
 
     def get_run_dates(self, start_date, end_date=None):
         """
@@ -591,7 +594,11 @@ class DAG(BaseDag, LoggingMixin):
             fallback=False) and self.schedule_interval is None
 
     @provide_session
-    def _get_concurrency_reached(self, session=None) -> bool:
+    def get_concurrency_reached(self, session=None) -> bool:
+        """
+        Returns a boolean indicating whether the concurrency limit for this DAG
+        has been reached
+        """
         TI = TaskInstance
         qry = session.query(func.count(TI.task_id)).filter(
             TI.dag_id == self.dag_id,
@@ -600,25 +607,37 @@ class DAG(BaseDag, LoggingMixin):
         return qry.scalar() >= self.concurrency
 
     @property
-    def concurrency_reached(self) -> bool:
+    def concurrency_reached(self):
         """
-        Returns a boolean indicating whether the concurrency limit for this DAG
-        has been reached
+        This attribute is deprecated. Please use `airflow.models.DAG.get_concurrency_reached` method.
         """
-        return self._get_concurrency_reached()
+        warnings.warn(
+            "This attribute is deprecated. Please use `airflow.models.DAG.get_concurrency_reached` method.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_concurrency_reached()
 
     @provide_session
-    def _get_is_paused(self, session=None):
+    def get_is_paused(self, session=None):
+        """
+        Returns a boolean indicating whether this DAG is paused
+        """
         qry = session.query(DagModel).filter(
             DagModel.dag_id == self.dag_id)
         return qry.value(DagModel.is_paused)
 
     @property
-    def is_paused(self) -> bool:
+    def is_paused(self):
         """
-        Returns a boolean indicating whether this DAG is paused
+        This attribute is deprecated. Please use `airflow.models.DAG.get_is_paused` method.
         """
-        return self._get_is_paused()
+        warnings.warn(
+            "This attribute is deprecated. Please use `airflow.models.DAG.get_is_paused` method.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_is_paused()
 
     @property
     def normalized_schedule_interval(self) -> Optional[ScheduleInterval]:
@@ -739,7 +758,10 @@ class DAG(BaseDag, LoggingMixin):
         return dagruns
 
     @provide_session
-    def _get_latest_execution_date(self, session=None):
+    def get_latest_execution_date(self, session=None):
+        """
+        Returns the latest date for which at least one dag run exists
+        """
         return session.query(func.max(DagRun.execution_date)).filter(
             DagRun.dag_id == self.dag_id
         ).scalar()
@@ -747,9 +769,14 @@ class DAG(BaseDag, LoggingMixin):
     @property
     def latest_execution_date(self):
         """
-        Returns the latest date for which at least one dag run exists
+        This attribute is deprecated. Please use `airflow.models.DAG.get_latest_execution_date` method.
         """
-        return self._get_latest_execution_date()
+        warnings.warn(
+            "This attribute is deprecated. Please use `airflow.models.DAG.get_latest_execution_date` method.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_latest_execution_date()
 
     @property
     def subdags(self):
@@ -1311,7 +1338,7 @@ class DAG(BaseDag, LoggingMixin):
         elif task.end_date and self.end_date:
             task.end_date = min(task.end_date, self.end_date)
 
-        if task.task_id in self.task_dict and self.task_dict[task.task_id] != task:
+        if task.task_id in self.task_dict and self.task_dict[task.task_id] is not task:
             raise DuplicateTaskIdFound(
                 "Task id '{}' has already been added to the DAG".format(task.task_id))
         else:
@@ -1359,7 +1386,7 @@ class DAG(BaseDag, LoggingMixin):
         :param local: True to run the tasks using the LocalExecutor
         :type local: bool
         :param executor: The executor instance to run the tasks
-        :type executor: airflow.executor.BaseExecutor
+        :type executor: airflow.executor.base_executor.BaseExecutor
         :param donot_pickle: True to avoid pickling DAG object and send to workers
         :type donot_pickle: bool
         :param ignore_task_deps: True to skip upstream tasks
@@ -1418,12 +1445,13 @@ class DAG(BaseDag, LoggingMixin):
 
     @provide_session
     def create_dagrun(self,
-                      run_id,
                       state,
                       execution_date=None,
+                      run_id=None,
                       start_date=None,
                       external_trigger=False,
                       conf=None,
+                      run_type=None,
                       session=None):
         """
         Creates a dag run from this dag including the tasks associated with this dag.
@@ -1431,6 +1459,8 @@ class DAG(BaseDag, LoggingMixin):
 
         :param run_id: defines the run id for this dag run
         :type run_id: str
+        :param run_type: type of DagRun
+        :type run_type: airflow.utils.types.DagRunType
         :param execution_date: the execution date of this dag run
         :type execution_date: datetime.datetime
         :param state: the state of the dag run
@@ -1442,6 +1472,19 @@ class DAG(BaseDag, LoggingMixin):
         :param session: database session
         :type session: sqlalchemy.orm.session.Session
         """
+        if run_id and not run_type:
+            if not isinstance(run_id, str):
+                raise ValueError(f"`run_id` expected to be a str is {type(run_id)}")
+            run_type: DagRunType = DagRunType.from_run_id(run_id)
+        elif run_type and execution_date:
+            if not isinstance(run_type, DagRunType):
+                raise ValueError(f"`run_type` expected to be a DagRunType is {type(run_type)}")
+            run_id = DagRun.generate_run_id(run_type, execution_date)
+        elif not run_id:
+            raise AirflowException(
+                "Creating DagRun needs either `run_id` or both `run_type` and `execution_date`"
+            )
+
         run = DagRun(
             dag_id=self.dag_id,
             run_id=run_id,
@@ -1449,7 +1492,8 @@ class DAG(BaseDag, LoggingMixin):
             start_date=start_date,
             external_trigger=external_trigger,
             conf=conf,
-            state=state
+            state=state,
+            run_type=run_type.value,
         )
         session.add(run)
 
@@ -1658,6 +1702,9 @@ class DagTag(Base):
     __tablename__ = "dag_tag"
     name = Column(String(100), primary_key=True)
     dag_id = Column(String(ID_LEN), ForeignKey('dag.dag_id'), primary_key=True)
+
+    def __repr__(self):
+        return self.name
 
 
 class DagModel(Base):

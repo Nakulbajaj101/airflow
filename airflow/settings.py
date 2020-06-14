@@ -21,7 +21,7 @@ import json
 import logging
 import os
 import sys
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import pendulum
 from sqlalchemy import create_engine, exc
@@ -34,19 +34,23 @@ from sqlalchemy.pool import NullPool
 from airflow import api
 from airflow.configuration import AIRFLOW_HOME, WEBSERVER_CONFIG, conf  # NOQA F401
 from airflow.logging_config import configure_logging
-from airflow.utils.module_loading import import_string
 from airflow.utils.sqlalchemy import setup_event_handlers
+
+if TYPE_CHECKING:
+    from airflow.models.baseoperator import BaseOperator
+    from airflow.models.taskinstance import TaskInstance
+
 
 log = logging.getLogger(__name__)
 
 
-TIMEZONE = pendulum.timezone('UTC')
+TIMEZONE = pendulum.tz.timezone('UTC')
 try:
     tz = conf.get("core", "default_timezone")
     if tz == "system":
-        TIMEZONE = pendulum.local_timezone()
+        TIMEZONE = pendulum.tz.local_timezone()
     else:
-        TIMEZONE = pendulum.timezone(tz)
+        TIMEZONE = pendulum.tz.timezone(tz)
 except Exception:
     pass
 log.info("Configured default timezone %s" % TIMEZONE)
@@ -80,18 +84,13 @@ Session: Optional[SASession] = None
 json = json
 
 
-def policy(task):
+def policy(task: 'BaseOperator'):
     """
-    This policy setting allows altering tasks right before they
-    are executed. It allows administrator to rewire some task parameters.
-
-    Note that the ``Task`` object has a reference to the DAG
-    object. So you can use the attributes of all of these to define your
-    policy.
+    This policy setting allows altering tasks after they are loaded in
+    the DagBag. It allows administrator to rewire some task parameters.
 
     To define policy, add a ``airflow_local_settings`` module
-    to your PYTHONPATH that defines this ``policy`` function. It receives
-    a ``Task`` object and can alter it where needed.
+    to your PYTHONPATH that defines this ``policy`` function.
 
     Here are a few examples of how this can be useful:
 
@@ -101,6 +100,18 @@ def policy(task):
     * You could enforce a task timeout policy, making sure that no tasks run
         for more than 48 hours
     * ...
+    """
+
+
+def task_instance_mutation_hook(task_instance: 'TaskInstance'):
+    """
+    This setting allows altering task instances before they are queued by
+    the Airflow scheduler.
+
+    To define task_instance_mutation_hook, add a ``airflow_local_settings`` module
+    to your PYTHONPATH that defines this ``task_instance_mutation_hook`` function.
+
+    This could be used, for instance, to modify the task instance during retries.
     """
 
 
@@ -186,9 +197,7 @@ def configure_orm(disable_connection_pool=False):
     engine_args['encoding'] = conf.get('core', 'SQL_ENGINE_ENCODING', fallback='utf-8')
 
     if conf.has_option('core', 'sql_alchemy_connect_args'):
-        connect_args = import_string(
-            conf.get('core', 'sql_alchemy_connect_args')
-        )
+        connect_args = conf.getimport('core', 'sql_alchemy_connect_args')
     else:
         connect_args = {}
 
@@ -217,7 +226,7 @@ def dispose_orm():
 
 
 def configure_adapters():
-    from pendulum import Pendulum
+    from pendulum import DateTime as Pendulum
     try:
         from sqlite3 import register_adapter
         register_adapter(Pendulum, lambda val: val.isoformat(' '))

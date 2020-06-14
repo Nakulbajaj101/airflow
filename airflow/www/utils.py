@@ -24,19 +24,19 @@ import flask_appbuilder.models.sqla.filters as fab_sqlafilters
 import markdown
 import sqlalchemy as sqla
 from flask import Markup, Response, request, url_for
-from flask_appbuilder.forms import DateTimeField, FieldConverter
+from flask_appbuilder.forms import FieldConverter
 from flask_appbuilder.models.sqla.interface import SQLAInterface
 from pygments import highlight, lexers
 from pygments.formatters import HtmlFormatter
 
 from airflow.configuration import conf
 from airflow.models.baseoperator import BaseOperator
-from airflow.models.dag import DagBag, DagModel
 from airflow.operators.subdag_operator import SubDagOperator
 from airflow.utils import timezone
 from airflow.utils.code_utils import get_python_source
 from airflow.utils.json import AirflowJsonEncoder
 from airflow.utils.state import State
+from airflow.www.forms import DateTimeWithTimezoneField
 from airflow.www.widgets import AirflowDateTimePickerWidget
 
 DEFAULT_SENSITIVE_VARIABLE_FIELDS = (
@@ -290,24 +290,25 @@ def pygment_html_render(s, lexer=lexers.TextLexer):
 def render(obj, lexer):
     out = ""
     if isinstance(obj, str):
-        out += pygment_html_render(obj, lexer)
+        out = Markup(pygment_html_render(obj, lexer))
     elif isinstance(obj, (tuple, list)):
         for i, s in enumerate(obj):
-            out += "<div>List item #{}</div>".format(i)
-            out += "<div>" + pygment_html_render(s, lexer) + "</div>"
+            out += Markup("<div>List item #{}</div>").format(i)
+            out += Markup("<div>" + pygment_html_render(s, lexer) + "</div>")
     elif isinstance(obj, dict):
         for k, v in obj.items():
-            out += '<div>Dict item "{}"</div>'.format(k)
-            out += "<div>" + pygment_html_render(v, lexer) + "</div>"
+            out += Markup('<div>Dict item "{}"</div>').format(k)
+            out += Markup("<div>" + pygment_html_render(v, lexer) + "</div>")
     return out
 
 
-def wrapped_markdown(s):
-    return (
-        '<div class="rich_doc">' + markdown.markdown(s) + "</div>"
-        if s is not None
-        else None
-    )
+def wrapped_markdown(s, css_class=None):
+    if s is None:
+        return None
+
+    return Markup(
+        '<div class="rich_doc {css_class}" >' + markdown.markdown(s) + "</div>"
+    ).format(css_class=css_class)
 
 
 def get_attr_renderer():
@@ -422,22 +423,6 @@ class CustomSQLAInterface(SQLAInterface):
 # subclass) so we have no other option than to edit the converstion table in
 # place
 FieldConverter.conversion_table = (
-    (('is_utcdatetime', DateTimeField, AirflowDateTimePickerWidget),) +
+    (('is_utcdatetime', DateTimeWithTimezoneField, AirflowDateTimePickerWidget),) +
     FieldConverter.conversion_table
 )
-
-
-def get_dag(orm_dag: DagModel, store_serialized_dags=False):
-    """Creates a dagbag to load and return a DAG.
-
-    Calling it from UI should set store_serialized_dags = STORE_SERIALIZED_DAGS.
-    There may be a delay for scheduler to write serialized DAG into database,
-    loads from file in this case.
-    FIXME: remove it when webserver does not access to DAG folder in future.
-    """
-    dag = DagBag(
-        dag_folder=orm_dag.fileloc, store_serialized_dags=store_serialized_dags).get_dag(orm_dag.dag_id)
-    if store_serialized_dags and dag is None:
-        dag = DagBag(
-            dag_folder=orm_dag.fileloc, store_serialized_dags=False).get_dag(orm_dag.dag_id)
-    return dag

@@ -278,7 +278,7 @@ Airflow provides operators for many common tasks, including:
 In addition to these basic building blocks, there are many more specific
 operators: :class:`~airflow.providers.docker.operators.docker.DockerOperator`,
 :class:`~airflow.providers.apache.hive.operators.hive.HiveOperator`, :class:`~airflow.providers.amazon.aws.operators.s3_file_transform.S3FileTransformOperator`,
-:class:`~airflow.providers.mysql.operators.presto_to_mysql.PrestoToMySqlTransfer`,
+:class:`~airflow.providers.mysql.operators.presto_to_mysql.PrestoToMySqlTransferOperator`,
 :class:`~airflow.providers.slack.operators.slack.SlackAPIOperator`... you get the idea!
 
 Operators are only loaded by Airflow if they are assigned to a DAG.
@@ -541,8 +541,8 @@ reached, runnable tasks get queued and their state will show as such in the
 UI. As slots free up, queued tasks start running based on the
 ``priority_weight`` (of the task and its descendants).
 
-``Pools are not thread-safe , in case of more than one scheduler in localExecutor Mode
-you can't ensure the non-scheduling of task even if the pool is full.``
+Pools are not thread-safe , in case of more than one scheduler in localExecutor Mode
+you can't ensure the non-scheduling of task even if the pool is full.
 
 Note that if tasks are not given a pool, they are assigned to a default
 pool ``default_pool``.  ``default_pool`` is initialized with 128 slots and
@@ -566,7 +566,7 @@ with the same ``conn_id``, the :py:meth:`~airflow.hooks.base_hook.BaseHook.get_c
 provide basic load balancing and fault tolerance, when used in conjunction with retries.
 
 Airflow also provides a mechanism to store connections outside the database, e.g. in :ref:`environment variables <environment_variables_secrets_backend>`.
-Additonal sources may be enabled, e.g. :ref:`AWS SSM Parameter Store <ssm_parameter_store_secrets>`, or you may
+Additional sources may be enabled, e.g. :ref:`AWS SSM Parameter Store <ssm_parameter_store_secrets>`, or you may
 :ref:`roll your own secrets backend <roll_your_own_secrets_backend>`.
 
 Many hooks have a default ``conn_id``, where operators using that hook do not
@@ -649,6 +649,15 @@ of what this may look like:
 Note that XComs are similar to `Variables`_, but are specifically designed
 for inter-task communication rather than global settings.
 
+Custom XCom backend
+-------------------
+
+It is possible to change ``XCom`` behaviour os serialization and deserialization of tasks' result.
+To do this one have to change ``xcom_backend`` parameter in Airflow config. Provided value should point
+to a class that is subclass of :class:`~airflow.models.xcom.BaseXCom`. To alter the serialaization /
+deserialization mechanism the custom class should override ``serialize_value`` and ``deserialize_value``
+methods.
+
 .. _concepts:variables:
 
 Variables
@@ -693,8 +702,10 @@ or if you need to deserialize a json object from the variable :
 Storing Variables in Environment Variables
 ------------------------------------------
 
+.. versionadded:: 1.10.10
+
 Airflow Variables can also be created and managed using Environment Variables. The environment variable
-naming convention is ``AIRFLOW_VAR_<variable_name>``, all uppercase.
+naming convention is :envvar:`AIRFLOW_VAR_{VARIABLE_NAME}`, all uppercase.
 So if your variable key is ``FOO`` then the variable name should be ``AIRFLOW_VAR_FOO``.
 
 For example,
@@ -718,6 +729,8 @@ You can use them in your DAGs as:
 
     Single underscores surround ``VAR``.  This is in contrast with the way ``airflow.cfg``
     parameters are stored, where double underscores surround the config section name.
+    Variables set using Environment Variables would not appear in the Airflow UI but you will
+    be able to use it in your DAG file.
 
 Branching
 =========
@@ -1034,10 +1047,18 @@ state.
 Cluster Policy
 ==============
 
-Your local Airflow settings file can define a ``policy`` function that
-has the ability to mutate task attributes based on other task or DAG
-attributes. It receives a single argument as a reference to task objects,
-and is expected to alter its attributes.
+In case you want to apply cluster-wide mutations to the Airflow tasks,
+you can either mutate the task right after the DAG is loaded or
+mutate the task instance before task execution.
+
+Mutate tasks after DAG loaded
+-----------------------------
+
+To mutate the task right after the DAG is parsed, you can define
+a ``policy`` function in ``airflow_local_settings.py`` that mutates the
+task based on other task or DAG attributes (through ``task.dag``).
+It receives a single argument as a reference to the task object and you can alter
+its attributes.
 
 For example, this function could apply a specific queue property when
 using a specific operator, or enforce a task timeout policy, making sure
@@ -1052,6 +1073,35 @@ may look like inside your ``airflow_local_settings.py``:
             task.queue = "sensor_queue"
         if task.timeout > timedelta(hours=48):
             task.timeout = timedelta(hours=48)
+
+
+Please note, cluster policy will have precedence over task
+attributes defined in DAG meaning if ``task.sla`` is defined
+in dag and also mutated via cluster policy then later will have precedence.
+
+
+Mutate task instances before task execution
+-------------------------------------------
+
+To mutate the task instance before the task execution, you can define a
+``task_instance_mutation_hook`` function in ``airflow_local_settings.py``
+that mutates the task instance.
+
+For example, this function re-routes the task to execute in a different
+queue during retries:
+
+.. code:: python
+
+    def task_instance_mutation_hook(ti):
+        if ti.try_number >= 1:
+            ti.queue = 'retry_queue'
+
+
+Where to put ``airflow_local_settings.py``?
+-------------------------------------------
+
+Add a ``airflow_local_settings.py`` file to your ``$PYTHONPATH``
+or to ``$AIRFLOW_HOME/config`` folder.
 
 
 Documentation & Notes
@@ -1195,6 +1245,51 @@ template string:
 
 See `Jinja documentation <https://jinja.palletsprojects.com/en/master/api/#jinja2.Environment>`_
 to find all available options.
+
+.. _exceptions:
+
+Exceptions
+==========
+
+Airflow defines a number of exceptions; most of these are used internally, but a few
+are relevant to authors of custom operators or python callables called from ``PythonOperator``
+tasks. Normally any exception raised from an ``execute`` method or python callable will either
+cause a task instance to fail if it is not configured to retry or has reached its limit on
+retry attempts, or to be marked as "up for retry". A few exceptions can be used when different
+behavior is desired:
+
+* ``AirflowSkipException`` can be raised to set the state of the current task instance to "skipped"
+* ``AirflowFailException`` can be raised to set the state of the current task to "failed" regardless
+  of whether there are any retry attempts remaining.
+
+This example illustrates some possibilities
+
+.. code:: python
+
+  from airflow.exceptions import AirflowFailException, AirflowSkipException
+
+  def fetch_data():
+      try:
+          data = get_some_data(get_api_key())
+          if not data:
+              # Set state to skipped and do not retry
+              # Downstream task behavior will be determined by trigger rules
+              raise AirflowSkipException("No data available.")
+      except Unauthorized:
+          # If we retry, our api key will still be bad, so don't waste time retrying!
+          # Set state to failed and move on
+          raise AirflowFailException("Our api key is bad!")
+      except TransientError:
+          print("Looks like there was a blip.")
+          # Raise the exception and let the task retry unless max attempts were reached
+          raise
+      handle(data)
+
+  task = PythonOperator(task_id="fetch_data", python_callable=fetch_data, retries=10)
+
+.. seealso::
+    - :ref:`List of Airflow exceptions <pythonapi:exceptions>`
+
 
 Packaged DAGs
 '''''''''''''
